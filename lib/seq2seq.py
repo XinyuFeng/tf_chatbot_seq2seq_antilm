@@ -61,22 +61,79 @@ import copy
 # We disable pylint because we need python3 compatibility.
 from six.moves import xrange  # pylint: disable=redefined-builtin
 from six.moves import zip  # pylint: disable=redefined-builtin
-
-from tensorflow.contrib.rnn.python.ops import core_rnn
+import tensorflow as tf
+#from tensorflow.contrib.rnn.python.ops import core_rnn
 from tensorflow.contrib.rnn.python.ops import core_rnn_cell
-from tensorflow.contrib.rnn.python.ops import core_rnn_cell_impl
+#from tensorflow.contrib.rnn.python.ops import core_rnn_cell_impl
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import embedding_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.util import nest
+from tensorflow.python.ops import variable_scope as vs
+
+def _linear(args, output_size, bias, bias_start=0.0, scope=None):
+  """Linear map: sum_i(args[i] * W[i]), where W[i] is a variable.
+
+  Args:
+    args: a 2D Tensor or a list of 2D, batch x n, Tensors.
+    output_size: int, second dimension of W[i].
+    bias: boolean, whether to add a bias term or not.
+    bias_start: starting value to initialize the bias; 0 by default.
+    scope: (optional) Variable scope to create parameters in.
+
+  Returns:
+    A 2D Tensor with shape [batch x output_size] equal to
+    sum_i(args[i] * W[i]), where W[i]s are newly created matrices.
+
+  Raises:
+    ValueError: if some of the arguments has unspecified or wrong shape.
+  """
+  if args is None or (nest.is_sequence(args) and not args):
+    raise ValueError("`args` must be specified")
+  if not nest.is_sequence(args):
+    args = [args]
+
+  # Calculate the total size of arguments on dimension 1.
+  total_arg_size = 0
+  shapes = [a.get_shape() for a in args]
+  for shape in shapes:
+    if shape.ndims != 2:
+      raise ValueError("linear is expecting 2D arguments: %s" % shapes)
+    if shape[1].value is None:
+      raise ValueError("linear expects shape[1] to be provided for shape %s, "
+                       "but saw %s" % (shape, shape[1]))
+    else:
+      total_arg_size += shape[1].value
+
+  dtype = [a.dtype for a in args][0]
+
+  # Now the computation.
+  scope = vs.get_variable_scope()
+  with vs.variable_scope(scope) as outer_scope:
+    weights = vs.get_variable(
+        "weights", [total_arg_size, output_size], dtype=dtype)
+    if len(args) == 1:
+      res = math_ops.matmul(args[0], weights)
+    else:
+      res = math_ops.matmul(array_ops.concat(args, 1), weights)
+    if not bias:
+      return res
+    with vs.variable_scope(outer_scope) as inner_scope:
+      inner_scope.set_partitioner(None)
+      biases = vs.get_variable(
+          "biases", [output_size],
+          dtype=dtype,
+          initializer=init_ops.constant_initializer(bias_start, dtype=dtype))
+  return nn_ops.bias_add(res, biases)
 
 # TODO(ebrevdo): Remove once _linear is fully deprecated.
-linear = core_rnn_cell_impl._linear  # pylint: disable=protected-access
+linear = _linear  # pylint: disable=protected-access
 
 
 def _extract_argmax_and_embed(embedding,
@@ -846,12 +903,12 @@ def embedding_attention_seq2seq(encoder_inputs,
       scope or "embedding_attention_seq2seq", dtype=dtype) as scope:
     dtype = scope.dtype
     # Encoder.
-    encoder_cell = copy.deepcopy(cell)
+    #encoder_cell = copy.deepcopy(cell)
     encoder_cell = core_rnn_cell.EmbeddingWrapper(
-        encoder_cell,
+        cell, #encoder_cell,
         embedding_classes=num_encoder_symbols,
         embedding_size=embedding_size)
-    encoder_outputs, encoder_state = core_rnn.static_rnn(
+    encoder_outputs, encoder_state = tf.nn.static_rnn(
         encoder_cell, encoder_inputs, dtype=dtype)
 
     # First calculate a concatenation of encoder outputs to put attention on.
@@ -989,7 +1046,7 @@ def one2many_rnn_seq2seq(encoder_inputs,
         enc_cell,
         embedding_classes=num_encoder_symbols,
         embedding_size=embedding_size)
-    _, encoder_state = core_rnn.static_rnn(
+    _, encoder_state = tf.nn.static_rnn(
         enc_cell, encoder_inputs, dtype=dtype)
 
     # Decoder.

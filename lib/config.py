@@ -1,6 +1,7 @@
 import argparse
 
 def params_setup(cmdline=None):
+  print("setting up paragrams...")
   parser = argparse.ArgumentParser()
   parser.add_argument('--mode', type=str, required=True, help='work mode: train/test/chat')
   

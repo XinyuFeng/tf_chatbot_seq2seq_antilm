@@ -74,6 +74,7 @@ def train(args):
 
           # Get a batch and make a step.
           start_time = time.time()
+
           encoder_inputs, decoder_inputs, target_weights = model.get_batch(
               train_set, bucket_id)
 

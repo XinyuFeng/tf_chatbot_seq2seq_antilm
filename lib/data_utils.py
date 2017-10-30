@@ -348,6 +348,7 @@ def prepare_data(data_dir, from_train_path, to_train_path, from_dev_path, to_dev
 
 
 def prepare_dialog_data(data_dir, vocabulary_size):
+
   """Get dialog data into data_dir, create vocabularies and tokenize data.
 
   Args:

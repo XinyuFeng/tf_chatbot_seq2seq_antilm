@@ -103,6 +103,7 @@ class Seq2SeqModel(object):
         w_t = tf.get_variable("proj_w", [self.target_vocab_size, size], dtype=dtype)
         w = tf.transpose(w_t)
         b = tf.get_variable("proj_b", [self.target_vocab_size], dtype=dtype)
+        print("projection is not none!!!!!!!!")
         output_projection = (w, b)
 
         def sampled_loss(labels, inputs):
@@ -125,13 +126,14 @@ class Seq2SeqModel(object):
 
       # Create the internal multi-layer cell for our RNN.
       def single_cell():
+        if use_lstm:
+          return tf.contrib.rnn.BasicLSTMCell(size, forget_bias=0.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
         return tf.contrib.rnn.GRUCell(size)
-      if use_lstm:
-        def single_cell():
-          return tf.contrib.rnn.BasicLSTMCell(size)
+      
       cell = single_cell()
       if num_layers > 1:
-        cell = tf.contrib.rnn.MultiRNNCell([single_cell() for _ in range(num_layers)])
+        cell = tf.contrib.rnn.MultiRNNCell([single_cell() for _ in range(num_layers)], state_is_tuple=True)
+        print(tf.__version__)
 
       # The seq2seq function: we use embedding for the input and attention.
       def seq2seq_f(encoder_inputs, decoder_inputs, feed_previous):
@@ -175,6 +177,7 @@ class Seq2SeqModel(object):
             softmax_loss_function=softmax_loss_function)
         # If we use output projection, we need to project outputs for decoding.
         if output_projection is not None:
+          print("output_projection is not None!!!")
           for b in xrange(len(buckets)):
             self.outputs[b] = [
                 tf.matmul(output, output_projection[0]) + output_projection[1]
@@ -186,7 +189,14 @@ class Seq2SeqModel(object):
             self.target_weights, buckets,
             lambda x, y: seq2seq_f(x, y, False),
             softmax_loss_function=softmax_loss_function)
-
+        # If we use output projection, we need to project outputs for decoding.
+        if output_projection is not None:
+          print("output_projection is not None!!!")
+          for b in xrange(len(buckets)):
+            self.outputs[b] = [
+                tf.matmul(output, output_projection[0]) + output_projection[1]
+                for output in self.outputs[b]
+            ]
       # # Training outputs and losses.
       # self.outputs, self.losses, self.encoder_state = tf_seq2seq.model_with_buckets(
       #     self.encoder_inputs, self.decoder_inputs, targets,
@@ -214,7 +224,7 @@ class Seq2SeqModel(object):
       self.advantage = [tf.placeholder(tf.float32, name="advantage_%i" % i) for i in xrange(len(buckets))]
       opt = tf.train.GradientDescentOptimizer(self.learning_rate)
       for b in xrange(len(buckets)):
-        # self.losses[b] = tf.subtract(self.losses[b], self.advantage[b])
+        self.losses[b] = tf.subtract(self.losses[b], self.advantage[b])
         gradients = tf.gradients(self.losses[b], params)
         clipped_gradients, norm = tf.clip_by_global_norm(gradients,
                                                          max_gradient_norm)
@@ -286,7 +296,10 @@ class Seq2SeqModel(object):
     else:
       output_feed = [self.encoder_state[bucket_id], 
                      self.losses[bucket_id]]  # Loss for this batch.
+      #print("decoder_size:")
+      #print(decoder_size)
       for l in xrange(decoder_size):  # Output logits.
+        #print(self.outputs[bucket_id][l].get_shape())
         output_feed.append(self.outputs[bucket_id][l])
 
     outputs = session.run(output_feed, input_feed)
@@ -330,8 +343,9 @@ class Seq2SeqModel(object):
     # [Episode] per episode = n steps, until break
     while True:
       #----[Step]----------------------------------------
+      #print(np.array(decoder_inputs).shape)
       encoder_state, step_loss, output_logits = self.step(session, encoder_inputs, decoder_inputs, target_weights,
-                          bucket_id, training=False, force_dec_input=False)
+                          bucket_id, forward_only=True, force_dec_input=False)
       
       # memorize inputs for reproducing curriculum with adjusted losses
       ep_encoder_inputs.append(encoder_inputs)
@@ -346,29 +360,36 @@ class Seq2SeqModel(object):
       if debug: print("[RESP]: (%.4f) %s" % (step_loss, resp_txt))
 
       # prepare for next dialogue
-      bucket_id = min([b for b in range(len(args.buckets)) if args.buckets[b][0] > len(resp_tokens)])
+      bucket_id = min([b for b in range(len(args.buckets)) if args.buckets[b][0] >= len(resp_tokens)])
       feed_data = {bucket_id: [(resp_tokens, [])]}
       encoder_inputs, decoder_inputs, target_weights = self.get_batch(feed_data, bucket_id)
       
       #----[Reward]----------------------------------------
       # r1: Ease of answering
-      r1 = [self.logProb(session, args.buckets, resp_tokens, d) for d in self.dummy_dialogs]
+
+      r1 = [self.logProb(session, args.buckets, resp_tokens, d, weights=target_weights, isBatch=False) for d in self.dummy_dialogs]
       r1 = -np.mean(r1) if r1 else 0
       
+      def dis(v):
+        return np.sqrt(sum([i*i for i in v]))
       # r2: Information Flow
       if len(enc_states) < 2:
         r2 = 0
       else:
         vec_a, vec_b = enc_states[-2], enc_states[-1]
-        r2 = sum(vec_a*vec_b) / sum(abs(vec_a)*abs(vec_b))
-        r2 = -log(r2)
+        r2 = sum(vec_a*vec_b) / (dis(vec_a)*dis(vec_b))
+        r2 = -log(np.cos(r2))
       
       # r3: Semantic Coherence
-      r3 = -self.logProb(session, args.buckets, resp_tokens, ep_encoder_inputs[-1])
+
+      tp_encoder_inputs = [I[0] for I in ep_encoder_inputs[-1]]
+      r31 = self.logProb(session, args.buckets, resp_tokens, tp_encoder_inputs)
+      r32 = self.logProb(session, args.buckets, tp_encoder_inputs, resp_tokens)
+      r3 = (np.mean(r31) if r31 else 0) + (np.mean(r32) if r32 else 0)
 
       # Episode total reward
       R = 0.25*r1 + 0.25*r2 + 0.5*r3
-      rewards.append(R)
+      ep_rewards.append(R)
       #----------------------------------------------------
       if (resp_txt in self.dummy_dialogs) or (len(resp_tokens) <= 3) or (encoder_inputs in ep_encoder_inputs): 
         break # check if dialog ended
@@ -377,45 +398,53 @@ class Seq2SeqModel(object):
     rto = (max(ep_step_loss) - min(ep_step_loss)) / (max(ep_rewards) - min(ep_rewards))
     advantage = [mp.mean(ep_rewards)*rto] * len(args.buckets)
     _, step_loss, _ = self.step(session, init_inputs[0], init_inputs[1], init_inputs[2], init_inputs[3],
-              training=True, force_dec_input=False, advantage=advantage)
+              forward_only=False, force_dec_input=False)
     
     return None, step_loss, None
 
 
-
   # log(P(b|a)), the conditional likelyhood
-  def logProb(self, session, buckets, tokens_a, tokens_b):
+  def logProb(self, session, buckets, tokens_a, tokens_b, weights=None, isBatch=False):
+
     def softmax(x):
       return np.exp(x) / np.sum(np.exp(x), axis=0)
 
     # prepare for next dialogue
-    bucket_id = min([b for b in range(len(buckets)) if buckets[b][0] > len(tokens_a)])
+    bucket_id = min([b for b in range(len(buckets)) if buckets[b][0] >= len(tokens_a)])
     feed_data = {bucket_id: [(tokens_a, tokens_b)]}
+
     encoder_inputs, decoder_inputs, target_weights = self.get_batch(feed_data, bucket_id)
 
     # step
+    #print(decoder_inputs)
     _, _, output_logits = self.step(session, encoder_inputs, decoder_inputs, target_weights,
-                        bucket_id, training=False, force_dec_input=True)
-    
+                        bucket_id, forward_only=True)
+    #print("output_logits: shape")
+    #@print(np.array(output_logits).shape)
     # p = log(P(b|a)) / N
     p = 1
     for t, logit in zip(tokens_b, output_logits):
+
       p *= softmax(logit[0])[t]
     p = log(p) / len(tokens_b)
     return p
 
 
   def logits2tokens(self, logits, rev_vocab, sent_max_length=None, reverse=False):
-    if reverse:
-      tokens = [t[0] for t in reversed(logits)]
-    else:
-      tokens = [int(np.argmax(t, axis=1)) for t in logits]
-    if data_utils.EOS_ID in tokens:
-      eos = tokens.index(data_utils.EOS_ID)
-      tokens = tokens[:eos]
-    txt = [rev_vocab[t] for t in tokens]
-    if sent_max_length:
-      tokens, txt = tokens[:sent_max_length], txt[:sent_max_length]
+    tokens = []
+    txt = []
+    if logits:
+      if reverse:
+        tokens = [t[0] for t in reversed(logits)]
+      else:
+        tokens = [int(np.argmax(t, axis=1)) for t in logits]
+      if data_utils.EOS_ID in tokens:
+        eos = tokens.index(data_utils.EOS_ID)
+        tokens = tokens[:eos]
+      txt = [rev_vocab[t] for t in tokens]
+      if sent_max_length:
+        tokens, txt = tokens[:sent_max_length], txt[:sent_max_length]
+      return tokens, txt
     return tokens, txt
 
 
